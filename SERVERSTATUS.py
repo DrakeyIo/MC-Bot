@@ -1,96 +1,88 @@
-import requests
-import time
+import discord
+import os
+import asyncio
+import re
+from discord.ext import commands
 from mcstatus import JavaServer
+from flask import Flask
+from threading import Thread
 
-# Server details
-SERVER_IP = "TideCleansers.aternos.me"
-PORT = 26326  # No quotes for integer
-WEBHOOK_URL = "https://discord.com/api/webhooks/1354763177161654364/6xrNzpS0P5F_ytMrIuoXwbOyJg5E-DnPJ36LJSFO06NGH6UFMmyiziGM8fi8Hi7mJFsw"
+# Flask app to keep the bot alive
+app = Flask('')
 
-message_id = None  # Stores the Discord message ID
+@app.route('/')
+def home():
+    return "Bot is running!"
 
-def get_server_status():
-    """Fetch server status using mcstatus with a fallback method."""
-    try:
-        server = JavaServer.lookup(f"{SERVER_IP}:{PORT}")
-        status = server.status()
+def run():
+    app.run(host='0.0.0.0', port=8080)
 
-        return {
-            "status": "🟢 Online",
-            "players": f"{status.players.online} / {status.players.max}",
-            "motd": status.motd.formatted if hasattr(status.motd, "formatted") else "No MOTD",
-            "version": status.version.name,
-            "ping": f"{status.latency:.2f} ms",
-        }
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
-    except Exception:
-        # Alternative API if mcstatus fails
-        url = f"https://api.mcsrvstat.us/2/{SERVER_IP}"
-        response = requests.get(url).json()
-        
-        if response.get("online"):
-            return {
-                "status": "🟢 Online",
-                "players": f"{response['players']['online']} / {response['players']['max']}",
-                "motd": response['motd']['clean'] if 'motd' in response else "No MOTD",
-                "version": response['version'] if 'version' in response else "Unknown Version",
-                "ping": "N/A",
-            }
-        else:
-            return {"status": "🔴 Offline"}
+# Get environment variables from Secrets
+TOKEN = os.environ["DISCORD_TOKEN"]
+SERVER_IP = os.environ["SERVER_IP"]
+SERVER_PORT = int(os.environ["SERVER_PORT"])
+CHANNEL_ID = 1354762861116784791  # Replace with your actual Discord channel ID
+SERVER_ADDRESS = f"{SERVER_IP}:{SERVER_PORT}"  # Full address
 
-def format_embed(status):
-    """Format the server status into an embed message."""
-    embed = {
-        "title": "🌍 Minecraft Server Status",
-        "color": 3066993 if "Online" in status["status"] else 15158332,
-        "fields": [
-            {"name": "🖥️ Server IP", "value": f"`{SERVER_IP}:{PORT}`", "inline": True},
-            {"name": "📡 Status", "value": status["status"], "inline": True},
-        ],
-        "footer": {"text": "Last updated"},
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
+# Discord bot setup
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-    if "players" in status:
-        embed["fields"].append({"name": "👥 Players Online", "value": status["players"], "inline": True})
-    if "motd" in status:
-        embed["fields"].append({"name": "📢 Server MOTD", "value": f"```{status['motd']}```", "inline": False})
-    if "version" in status:
-        embed["fields"].append({"name": "🛠 Version", "value": status["version"], "inline": True})
-    if "ping" in status:
-        embed["fields"].append({"name": "📶 Ping", "value": status["ping"], "inline": True})
+def remove_minecraft_color_codes(text):
+    """Remove Minecraft formatting codes (e.g., §4, §l) from text."""
+    return re.sub(r"§[0-9A-FK-OR]", "", text, flags=re.IGNORECASE)
 
-    return {"embeds": [embed]}
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
 
-def send_initial_message():
-    """Send the first message to Discord and get its message ID."""
-    global message_id
-    data = format_embed(get_server_status())
-    response = requests.post(WEBHOOK_URL, json=data)
-    
-    if response.status_code == 200:
-        message_id = response.json().get("id")
-        print(f"Message sent successfully! ID: {message_id}")
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(title="🌍 Minecraft Server Status", color=discord.Color.orange())
+        embed.add_field(name="⏳ Checking status...", value="Please wait...", inline=False)
+        embed.set_footer(text="Last updated: Just now ⏳")
+        status_msg = await channel.send(embed=embed)  # Send initial message
+
+        bot.loop.create_task(update_status(status_msg))  # Start status update loop
     else:
-        print(f"Failed to send initial message: {response.text}")
+        print("Channel not found. Make sure the bot has access to it.")
 
-def update_message():
-    """Edit the existing message to update the status."""
-    global message_id
-    if message_id is None:
-        send_initial_message()  # Send the first message if it doesn't exist
-        return
+async def update_status(status_msg):
+    while True:
+        try:
+            server = JavaServer.lookup(SERVER_ADDRESS)
+            status = server.status()
 
-    data = format_embed(get_server_status())
-    edit_url = f"{WEBHOOK_URL}/messages/{message_id}"
-    response = requests.patch(edit_url, json=data)
+            # Fetching additional details
+            raw_motd = status.description if status.description else "No MOTD set"
+            motd = remove_minecraft_color_codes(raw_motd)  # Fix MOTD formatting
+            version = status.version.name if status.version else "Unknown"
+            player_list = "\n".join([f"➡️ {player.name}" for player in status.players.sample]) if status.players.sample else "No players online"
 
-    if response.status_code not in [200, 204]:
-        print(f"Failed to update message: {response.text}")
+            embed = discord.Embed(title="🌍 Minecraft Server Status", color=discord.Color.green())
+            embed.add_field(name="🔗 **Server Address**", value=f"`{SERVER_ADDRESS}`", inline=False)  # Added server address
+            embed.add_field(name="🟢 **Server Status**", value="✅ Online", inline=False)
+            embed.add_field(name="📌 **MOTD**", value=f"```{motd}```", inline=False)
+            embed.add_field(name="🔢 **Server Version**", value=f"`{version}`", inline=True)
+            embed.add_field(name="👥 **Players Online**", value=f"`{status.players.online}/{status.players.max}`", inline=True)
+            embed.add_field(name="📡 **Ping**", value=f"`{status.latency}ms`", inline=True)
+            embed.add_field(name="🎮 **Active Players**", value=f"```{player_list}```", inline=False)
+            embed.set_footer(text="Last updated:")
+            embed.timestamp = discord.utils.utcnow()
+        except Exception:
+            embed = discord.Embed(title="🌍 Minecraft Server Status", color=discord.Color.red())
+            embed.add_field(name="🔗 **Server Address**", value=f"`{SERVER_ADDRESS}`", inline=False)
+            embed.add_field(name="🔴 **Server Status**", value="❌ Offline", inline=False)
+            embed.set_footer(text="Last checked:")
+            embed.timestamp = discord.utils.utcnow()
 
-# Start the loop
-send_initial_message()  # Send the first message
-while True:
-    update_message()  # Update the existing message
-    time.sleep(60)  # Updates every 1 minute (optimized for performance)
+        await status_msg.edit(embed=embed)  # Edit the original message
+        await asyncio.sleep(30)  # Update every 30 seconds
+
+# Keep bot alive and run it
+keep_alive()
+bot.run(TOKEN)
