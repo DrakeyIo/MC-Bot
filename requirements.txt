@@ -1,3 +1,4 @@
 discord
 mcstatus
 flask
+requests
