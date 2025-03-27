@@ -1,6 +1,8 @@
 import discord
+import os
 import asyncio
-from discord.ext import commands, tasks
+import re
+from discord.ext import commands
 from mcstatus import JavaServer
 from flask import Flask
 from threading import Thread
@@ -19,62 +21,67 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# 🔒 Hardcoded bot token and server details (⚠️ Do not expose publicly)
-TOKEN = "MTM1NDc4NzQ1NTY5NzY4Njc0OQ.GnfLjL.yHtdEshstFJWzrvsyV-GvBXNS9rzKw5yPozsyU"
-SERVER_IP = "TideCleansers.aternos.me"
-SERVER_PORT = 26326
+# Get environment variables from Secrets
+TOKEN = os.environ["DISCORD_TOKEN"]
+SERVER_IP = os.environ["SERVER_IP"]
+SERVER_PORT = int(os.environ["SERVER_PORT"])
 CHANNEL_ID = 1354762861116784791  # Replace with your actual Discord channel ID
+SERVER_ADDRESS = f"{SERVER_IP}:{SERVER_PORT}"  # Full address
 
 # Discord bot setup
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+def remove_minecraft_color_codes(text):
+    """Remove Minecraft formatting codes (e.g., §4, §l) from text."""
+    return re.sub(r"§[0-9A-FK-OR]", "", text, flags=re.IGNORECASE)
+
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
+    print(f"Logged in as {bot.user}")
+
     channel = bot.get_channel(CHANNEL_ID)
-    
     if channel:
-        embed = discord.Embed(
-            title="🌍 Minecraft Server Status",
-            description=f"Tracking status for `{SERVER_IP}:{SERVER_PORT}`",
-            color=discord.Color.green()
-        )
-        embed.set_footer(text="Status updates every 30 seconds")
-        msg = await channel.send(embed=embed)
-        
-        # Start updating the message every 30 seconds
-        update_status.start(msg)
+        embed = discord.Embed(title="🌍 Minecraft Server Status", color=discord.Color.orange())
+        embed.add_field(name="⏳ Checking status...", value="Please wait...", inline=False)
+        embed.set_footer(text="Last updated: Just now ⏳")
+        status_msg = await channel.send(embed=embed)  # Send initial message
+
+        bot.loop.create_task(update_status(status_msg))  # Start status update loop
     else:
-        print("⚠️ Channel not found. Make sure the bot has access!")
+        print("Channel not found. Make sure the bot has access to it.")
 
-@tasks.loop(seconds=30)
-async def update_status(msg):
-    """ Updates the embed message with the latest server status """
-    try:
-        server = JavaServer.lookup(f"{SERVER_IP}:{SERVER_PORT}")
-        status = server.status()
-        
-        embed = discord.Embed(
-            title="✅ Server is Online!",
-            description=f"🌐 **IP:** `{SERVER_IP}:{SERVER_PORT}`",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="👥 Players Online", value=f"{status.players.online}/{status.players.max}", inline=True)
-        embed.add_field(name="📶 Ping", value=f"{status.latency}ms", inline=True)
-        embed.add_field(name="📝 MOTD", value=status.description.replace("§", ""), inline=False)
-        embed.set_footer(text="🔄 Status updates every 30 seconds")
-        
-    except Exception as e:
-        embed = discord.Embed(
-            title="❌ Server is Offline!",
-            description="The Minecraft server is currently unreachable.",
-            color=discord.Color.red()
-        )
-        embed.set_footer(text="🔄 Checking again in 30 seconds")
-        print(e)
+async def update_status(status_msg):
+    while True:
+        try:
+            server = JavaServer.lookup(SERVER_ADDRESS)
+            status = server.status()
 
-    await msg.edit(embed=embed)
+            # Fetching additional details
+            raw_motd = status.description if status.description else "No MOTD set"
+            motd = remove_minecraft_color_codes(raw_motd)  # Fix MOTD formatting
+            version = status.version.name if status.version else "Unknown"
+            player_list = "\n".join([f"➡️ {player.name}" for player in status.players.sample]) if status.players.sample else "No players online"
+
+            embed = discord.Embed(title="🌍 Minecraft Server Status", color=discord.Color.green())
+            embed.add_field(name="🔗 **Server Address**", value=f"`{SERVER_ADDRESS}`", inline=False)  # Added server address
+            embed.add_field(name="🟢 **Server Status**", value="✅ Online", inline=False)
+            embed.add_field(name="📌 **MOTD**", value=f"```{motd}```", inline=False)
+            embed.add_field(name="🔢 **Server Version**", value=f"`{version}`", inline=True)
+            embed.add_field(name="👥 **Players Online**", value=f"`{status.players.online}/{status.players.max}`", inline=True)
+            embed.add_field(name="📡 **Ping**", value=f"`{status.latency}ms`", inline=True)
+            embed.add_field(name="🎮 **Active Players**", value=f"```{player_list}```", inline=False)
+            embed.set_footer(text="Last updated:")
+            embed.timestamp = discord.utils.utcnow()
+        except Exception:
+            embed = discord.Embed(title="🌍 Minecraft Server Status", color=discord.Color.red())
+            embed.add_field(name="🔗 **Server Address**", value=f"`{SERVER_ADDRESS}`", inline=False)
+            embed.add_field(name="🔴 **Server Status**", value="❌ Offline", inline=False)
+            embed.set_footer(text="Last checked:")
+            embed.timestamp = discord.utils.utcnow()
+
+        await status_msg.edit(embed=embed)  # Edit the original message
+        await asyncio.sleep(30)  # Update every 30 seconds
 
 # Keep bot alive and run it
 keep_alive()
