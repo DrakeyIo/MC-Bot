@@ -1,1 +1,1 @@
-worker: python SERVERSTATUS.py
+web: python SERVERSTATUS.py
